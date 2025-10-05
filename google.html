@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pentad Chat - Login</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 40px; 
+            text-align: center; 
+            background: #f5f5f5;
+        }
+        .login-container {
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-width: 400px;
+            margin: 0 auto;
+        }
+        .google-btn {
+            background: #4285f4;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 20px 0;
+        }
+        .google-btn:hover {
+            background: #357ae8;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h1>Pentad Chat</h1>
+        <p>Please login with Google to access the AI chat</p>
+        <a href="{{ url_for('google_login') }}">
+            <button class="google-btn">Login with Google</button>
+        </a>
+    </div>
+</body>
+</html>
