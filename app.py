@@ -7,7 +7,6 @@ from flask import Flask, request, Response, jsonify, render_template, redirect, 
 from flask_cors import CORS
 from dotenv import load_dotenv
 from openai import OpenAI
-import tiktoken
 import PyPDF2
 from io import BytesIO
 from authlib.integrations.flask_client import OAuth
@@ -39,8 +38,13 @@ google = oauth.register(
     client_kwargs={'scope': 'openid email profile'},
 )
 
-# Initialize token encoding
-enc = tiktoken.get_encoding("cl100k_base")
+# Simple token estimation (alternative to tiktoken)
+def estimate_tokens(text):
+    """Simple token estimation - roughly 4 characters per token"""
+    if not text:
+        return 0
+    return len(text) // 4
+
 TOKEN_LIMIT = 300_000
 tokens_used = 0
 
@@ -203,9 +207,9 @@ def generate(bot_name: str, system: str, user: str, file_contents: list = None):
             file_context = "\n\n".join(file_contents)
             full_user_prompt = f"{user}\n\nAttached files content:\n{file_context}"
         
-        # Calculate tokens for the request
-        system_tokens = len(enc.encode(system))
-        user_tokens = len(enc.encode(full_user_prompt))
+        # Estimate tokens (alternative to tiktoken)
+        system_tokens = estimate_tokens(system)
+        user_tokens = estimate_tokens(full_user_prompt)
         tokens_used += system_tokens + user_tokens
         
         model = OPENROUTER_MODELS.get(bot_name, "deepseek/deepseek-chat-v3.1:free")
@@ -233,14 +237,14 @@ def generate(bot_name: str, system: str, user: str, file_contents: list = None):
             if chunk.choices and chunk.choices[0].delta.content is not None:
                 delta = chunk.choices[0].delta.content
                 full_response += delta
-                bot_tokens += len(enc.encode(delta))
+                bot_tokens += estimate_tokens(delta)
                 yield f"data: {json.dumps({'bot': bot_name, 'text': delta})}\n\n"
             
             if chunk.choices and chunk.choices[0].finish_reason:
                 break
         
         tokens_used += bot_tokens
-        logger.info(f"Completed generation for {bot_name}, tokens used: {bot_tokens}")
+        logger.info(f"Completed generation for {bot_name}, estimated tokens used: {bot_tokens}")
         yield f"data: {json.dumps({'bot': bot_name, 'done': True, 'tokens': tokens_used})}\n\n"
         
     except Exception as exc:
@@ -418,7 +422,7 @@ Please provide the best synthesized answer that combines the strengths of all AI
             )
             
             best_answer = response.choices[0].message.content
-            asklurk_tokens = len(enc.encode(best_answer))
+            asklurk_tokens = estimate_tokens(best_answer)
             global tokens_used
             tokens_used += asklurk_tokens
             
@@ -452,7 +456,7 @@ def upload():
             if file.filename == '':
                 continue
             
-            allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.txt', '.doc', '.docx'}
+            allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.txt'}
             ext = os.path.splitext(file.filename)[1].lower()
             
             if ext not in allowed_extensions:
@@ -500,7 +504,7 @@ def health():
         "google_oauth_configured": bool(os.environ.get("GOOGLE_CLIENT_ID")),
         "models_configured": len(OPENROUTER_MODELS),
         "tokens_used": tokens_used,
-        "environment": "production" if not __debug__ else "development"
+        "environment": "production"
     })
 
 @app.route("/test")
