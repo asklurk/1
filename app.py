@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = os.environ.get("SESSION_SECRET", "your-secret-key-here")
+app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key-123")
 CORS(app)
 
 # OAuth configuration
@@ -39,52 +39,6 @@ google = oauth.register(
     client_kwargs={'scope': 'openid email profile'},
 )
 
-@app.route('/')
-def index():
-    # Check if user is logged in, if not redirect to login
-    if 'user' not in session:
-        return redirect(url_for('login'))
-    return render_template('index.html')
-
-@app.route('/login')
-def login():
-    # If user is already logged in, redirect to main page
-    if 'user' in session:
-        return redirect(url_for('index'))
-    return render_template('google.html')
-
-@app.route('/login/google')
-def google_login():
-    google = oauth.create_client('google')
-    redirect_uri = url_for('google_authorize', _external=True)
-    return google.authorize_redirect(redirect_uri)
-
-@app.route('/login/google/authorize')
-def google_authorize():
-    google = oauth.create_client('google')
-    try:
-        token = google.authorize_access_token()
-        resp = google.get('userinfo').json()
-        
-        # Store user information in session
-        session['user'] = {
-            'name': resp.get('name'),
-            'email': resp.get('email'),
-            'google_id': resp.get('id')
-        }
-        
-        logger.info(f"User logged in: {resp.get('name')} ({resp.get('email')})")
-        return redirect(url_for('index'))
-        
-    except Exception as e:
-        logger.error(f"Google OAuth error: {str(e)}")
-        return redirect(url_for('login'))
-
-@app.route('/logout')
-def logout():
-    session.pop('user', None)
-    return redirect(url_for('login'))
-
 # Initialize token encoding
 enc = tiktoken.get_encoding("cl100k_base")
 TOKEN_LIMIT = 300_000
@@ -93,8 +47,7 @@ tokens_used = 0
 # Initialize OpenRouter API key
 KEY = os.getenv("OPENROUTER_API_KEY")
 if not KEY:
-    logging.error("OPENROUTER_API_KEY missing – export it or add to .env")
-    sys.exit(1)
+    logging.warning("OPENROUTER_API_KEY missing - AI features will be disabled")
 
 # Define the 5 AI models with their personalities
 MODELS = {
@@ -128,6 +81,59 @@ OPENROUTER_MODELS = {
 UPLOAD_FOLDER = 'static/uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# Authentication routes
+@app.route('/')
+def home():
+    """Main route - redirects to login if not authenticated"""
+    if 'user' not in session:
+        return redirect(url_for('login'))
+    return render_template('index.html')
+
+@app.route('/login')
+def login():
+    """Login page"""
+    if 'user' in session:
+        return redirect(url_for('home'))
+    return render_template('google.html')
+
+@app.route('/login/google')
+def google_login():
+    """Initiate Google OAuth flow"""
+    if not os.environ.get("GOOGLE_CLIENT_ID"):
+        return "Google OAuth not configured", 500
+    google = oauth.create_client('google')
+    redirect_uri = url_for('google_authorize', _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+@app.route('/login/google/authorize')
+def google_authorize():
+    """Google OAuth callback"""
+    try:
+        google = oauth.create_client('google')
+        token = google.authorize_access_token()
+        resp = google.get('userinfo').json()
+        
+        # Store user information in session
+        session['user'] = {
+            'name': resp.get('name'),
+            'email': resp.get('email'),
+            'google_id': resp.get('id')
+        }
+        
+        logger.info(f"User logged in: {resp.get('name')} ({resp.get('email')})")
+        return redirect(url_for('home'))
+        
+    except Exception as e:
+        logger.error(f"Google OAuth error: {str(e)}")
+        return redirect(url_for('login'))
+
+@app.route('/logout')
+def logout():
+    """Logout user"""
+    session.pop('user', None)
+    return redirect(url_for('login'))
+
+# AI Core Functions
 def extract_text_from_pdf(file_content):
     """Extract text content from PDF file"""
     try:
@@ -157,15 +163,12 @@ def process_uploaded_files(files):
                 else:
                     file_contents.append(f"PDF file '{file.filename}' (could not extract text)")
             
-            elif filename.endswith(('.txt', '.doc', '.docx')):
+            elif filename.endswith('.txt'):
                 try:
-                    if filename.endswith('.txt'):
-                        text_content = file_content.decode('utf-8')
-                        file_contents.append(f"Text Content from '{file.filename}':\n{text_content}\n")
-                    else:
-                        file_contents.append(f"Document file '{file.filename}' (content processing not implemented)")
+                    text_content = file_content.decode('utf-8')
+                    file_contents.append(f"Text Content from '{file.filename}':\n{text_content}\n")
                 except:
-                    file_contents.append(f"Document file '{file.filename}' (could not read content)")
+                    file_contents.append(f"Text file '{file.filename}' (could not read content)")
             
             elif filename.endswith(('.png', '.jpg', '.jpeg', '.gif')):
                 file_contents.append(f"Image file '{file.filename}'")
@@ -182,6 +185,11 @@ def process_uploaded_files(files):
 def generate(bot_name: str, system: str, user: str, file_contents: list = None):
     """Generate AI response for a specific bot using OpenRouter"""
     global tokens_used
+    
+    if not KEY:
+        yield f"data: {json.dumps({'bot': bot_name, 'error': 'OpenRouter API key not configured'})}\n\n"
+        return
+        
     client = None
     try:
         client = OpenAI(
@@ -195,6 +203,7 @@ def generate(bot_name: str, system: str, user: str, file_contents: list = None):
             file_context = "\n\n".join(file_contents)
             full_user_prompt = f"{user}\n\nAttached files content:\n{file_context}"
         
+        # Calculate tokens for the request
         system_tokens = len(enc.encode(system))
         user_tokens = len(enc.encode(full_user_prompt))
         tokens_used += system_tokens + user_tokens
@@ -204,7 +213,7 @@ def generate(bot_name: str, system: str, user: str, file_contents: list = None):
         
         stream = client.chat.completions.create(
             extra_headers={
-                "HTTP-Referer": "http://localhost:5000",
+                "HTTP-Referer": "https://your-vercel-app.vercel.app",
                 "X-Title": "Pentad-Chat"
             },
             model=model,
@@ -254,146 +263,18 @@ def generate(bot_name: str, system: str, user: str, file_contents: list = None):
             except:
                 pass
 
-@app.route("/asklurk", methods=["POST"])
-def asklurk():
-    """Synthesize the best answer from all AI responses"""
-    try:
-        data = request.json or {}
-        answers = data.get("answers", {})
-        prompt = data.get("prompt", "")
-        
-        if not answers:
-            return jsonify(best="", error="No responses to analyze"), 400
-        
-        try:
-            client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=KEY,
-                timeout=30.0
-            )
-            
-            merged_content = f"Original question: {prompt}\n\n"
-            for key, response in answers.items():
-                if key in MODELS:
-                    merged_content += f"## {MODELS[key]['name']}:\n{response}\n\n"
-            
-            response = client.chat.completions.create(
-                extra_headers={
-                    "HTTP-Referer": "http://localhost:5000",
-                    "X-Title": "Pentad-Chat"
-                },
-                model=OPENROUTER_MODELS["asklurk"],
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are AskLurk - an expert AI synthesizer. Your task is to analyze responses from Logic AI, Creative AI, Technical AI, Philosophical AI, and Humorous AI to create the single best answer. 
-                        
-                        Combine the logical reasoning, creative insights, technical accuracy, philosophical depth, and humorous engagement to provide a comprehensive, well-structured response that leverages the strengths of all approaches.
-                        
-                        Structure your response to be insightful, engaging, and balanced."""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""Please analyze these AI responses to the question: "{prompt}"
-
-Here are the responses:
-{merged_content}
-
-Please provide the best synthesized answer that combines the strengths of all AI responses:"""
-                    }
-                ],
-                temperature=0.3,
-                max_tokens=1500,
-            )
-            
-            best_answer = response.choices[0].message.content
-            asklurk_tokens = len(enc.encode(best_answer))
-            global tokens_used
-            tokens_used += asklurk_tokens
-            
-            return jsonify(best=best_answer, tokens_used=tokens_used)
-            
-        except Exception as e:
-            logger.error(f"AskLurk error: {str(e)}")
-            if answers:
-                first_response = next(iter(answers.values()))
-                return jsonify(best=f"Fallback - Using first response:\n\n{first_response}", error="AI synthesis failed")
-            return jsonify(best="", error="No responses available for synthesis")
-        
-    except Exception as e:
-        logger.error(f"AskLurk error: {e}")
-        return jsonify({'error': 'Internal server error'}), 500
-
-@app.route("/upload", methods=["POST"])
-def upload():
-    """Handle file uploads"""
-    try:
-        if 'files' not in request.files:
-            return jsonify(urls=[], error="No files provided"), 400
-        
-        files = request.files.getlist('files')
-        urls = []
-        
-        for file in files:
-            if file.filename == '':
-                continue
-            
-            allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.txt', '.doc', '.docx'}
-            ext = os.path.splitext(file.filename)[1].lower()
-            
-            if ext not in allowed_extensions:
-                continue
-                
-            name = f"{uuid.uuid4().hex}{ext}"
-            path = os.path.join(UPLOAD_FOLDER, name)
-            
-            try:
-                file.save(path)
-                urls.append(f"/static/uploads/{name}")
-            except Exception as e:
-                logger.error(f"Error saving file {file.filename}: {str(e)}")
-        
-        return jsonify(urls=urls)
-    
-    except Exception as e:
-        logger.error(f"Upload error: {e}")
-        return jsonify({'error': 'Internal server error'}), 500
-
-@app.route("/tokens", methods=["GET"])
-def get_tokens():
-    """Endpoint to get current token usage"""
-    return jsonify({
-        "tokens_used": tokens_used,
-        "token_limit": TOKEN_LIMIT,
-        "remaining_tokens": TOKEN_LIMIT - tokens_used,
-        "usage_percentage": (tokens_used / TOKEN_LIMIT) * 100
-    })
-
-@app.route("/reset-tokens", methods=["POST"])
-def reset_tokens():
-    """Endpoint to reset token counter"""
-    global tokens_used
-    tokens_used = 0
-    return jsonify({"message": "Token counter reset", "tokens_used": tokens_used})
-
-@app.route("/health", methods=["GET"])
-def health():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "ok",
-        "api_key_configured": bool(KEY),
-        "models_configured": len(OPENROUTER_MODELS),
-        "tokens_used": tokens_used
-    })
-
+# AI Routes
 @app.route("/chat", methods=["POST"])
 def chat():
     """Main chat endpoint for all AI models"""
-    try:
-        # Check if user is logged in
-        if 'user' not in session:
-            return jsonify(error="Authentication required"), 401
+    # Check if user is logged in
+    if 'user' not in session:
+        return jsonify(error="Authentication required"), 401
+        
+    if not KEY:
+        return jsonify(error="OpenRouter API key not configured"), 503
             
+    try:
         data = request.json or {}
         prompt = data.get("prompt", "").strip()
         fileUrls = data.get("fileUrls", [])
@@ -404,6 +285,7 @@ def chat():
         if tokens_used >= TOKEN_LIMIT:
             return jsonify(error=f"Token limit reached ({tokens_used}/{TOKEN_LIMIT})"), 429
         
+        # Process uploaded files
         file_contents = []
         if fileUrls:
             for file_url in fileUrls:
@@ -477,13 +359,181 @@ def chat():
         logger.error(f"Chat error: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
+@app.route("/asklurk", methods=["POST"])
+def asklurk():
+    """Synthesize the best answer from all AI responses"""
+    if 'user' not in session:
+        return jsonify(error="Authentication required"), 401
+        
+    if not KEY:
+        return jsonify(error="OpenRouter API key not configured"), 503
+        
+    try:
+        data = request.json or {}
+        answers = data.get("answers", {})
+        prompt = data.get("prompt", "")
+        
+        if not answers:
+            return jsonify(best="", error="No responses to analyze"), 400
+        
+        try:
+            client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=KEY,
+                timeout=30.0
+            )
+            
+            merged_content = f"Original question: {prompt}\n\n"
+            for key, response in answers.items():
+                if key in MODELS:
+                    merged_content += f"## {MODELS[key]['name']}:\n{response}\n\n"
+            
+            response = client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "https://your-vercel-app.vercel.app",
+                    "X-Title": "Pentad-Chat"
+                },
+                model=OPENROUTER_MODELS["asklurk"],
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """You are AskLurk - an expert AI synthesizer. Your task is to analyze responses from Logic AI, Creative AI, Technical AI, Philosophical AI, and Humorous AI to create the single best answer. 
+                        
+                        Combine the logical reasoning, creative insights, technical accuracy, philosophical depth, and humorous engagement to provide a comprehensive, well-structured response that leverages the strengths of all approaches.
+                        
+                        Structure your response to be insightful, engaging, and balanced."""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""Please analyze these AI responses to the question: "{prompt}"
+
+Here are the responses:
+{merged_content}
+
+Please provide the best synthesized answer that combines the strengths of all AI responses:"""
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+            )
+            
+            best_answer = response.choices[0].message.content
+            asklurk_tokens = len(enc.encode(best_answer))
+            global tokens_used
+            tokens_used += asklurk_tokens
+            
+            return jsonify(best=best_answer, tokens_used=tokens_used)
+            
+        except Exception as e:
+            logger.error(f"AskLurk error: {str(e)}")
+            if answers:
+                first_response = next(iter(answers.values()))
+                return jsonify(best=f"Fallback - Using first response:\n\n{first_response}", error="AI synthesis failed")
+            return jsonify(best="", error="No responses available for synthesis")
+        
+    except Exception as e:
+        logger.error(f"AskLurk error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    """Handle file uploads"""
+    if 'user' not in session:
+        return jsonify(error="Authentication required"), 401
+        
+    try:
+        if 'files' not in request.files:
+            return jsonify(urls=[], error="No files provided"), 400
+        
+        files = request.files.getlist('files')
+        urls = []
+        
+        for file in files:
+            if file.filename == '':
+                continue
+            
+            allowed_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.txt', '.doc', '.docx'}
+            ext = os.path.splitext(file.filename)[1].lower()
+            
+            if ext not in allowed_extensions:
+                continue
+                
+            name = f"{uuid.uuid4().hex}{ext}"
+            path = os.path.join(UPLOAD_FOLDER, name)
+            
+            try:
+                file.save(path)
+                urls.append(f"/static/uploads/{name}")
+            except Exception as e:
+                logger.error(f"Error saving file {file.filename}: {str(e)}")
+        
+        return jsonify(urls=urls)
+    
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+# Utility Routes
+@app.route("/tokens", methods=["GET"])
+def get_tokens():
+    """Endpoint to get current token usage"""
+    return jsonify({
+        "tokens_used": tokens_used,
+        "token_limit": TOKEN_LIMIT,
+        "remaining_tokens": TOKEN_LIMIT - tokens_used,
+        "usage_percentage": (tokens_used / TOKEN_LIMIT) * 100
+    })
+
+@app.route("/reset-tokens", methods=["POST"])
+def reset_tokens():
+    """Endpoint to reset token counter"""
+    global tokens_used
+    tokens_used = 0
+    return jsonify({"message": "Token counter reset", "tokens_used": tokens_used})
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "ok",
+        "api_key_configured": bool(KEY),
+        "google_oauth_configured": bool(os.environ.get("GOOGLE_CLIENT_ID")),
+        "models_configured": len(OPENROUTER_MODELS),
+        "tokens_used": tokens_used,
+        "environment": "production" if not __debug__ else "development"
+    })
+
+@app.route("/test")
+def test():
+    """Test route"""
+    return jsonify({
+        "status": "success", 
+        "message": "Pentad Chat API is working!",
+        "ai_configured": bool(KEY),
+        "user_authenticated": 'user' in session
+    })
+
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Route not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
+# Vercel compatibility
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    print("Starting Pentad Chat Server...")
-    print(f"OpenRouter API Key: {'✓ Configured' if KEY else '✗ Missing'}")
-    print(f"Google OAuth: {'✓ Configured' if os.environ.get('GOOGLE_CLIENT_ID') else '✗ Missing'}")
-    print("Available models: Logic AI, Creative AI, Technical AI, Philosophical AI, Humorous AI, AskLurk")
-    print(f"Server running on http://localhost:{port}")
+    debug = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
+    
+    print("🚀 Starting Pentad Chat Server...")
+    print(f"📍 Local: http://localhost:{port}")
+    print(f"🔧 Debug: {debug}")
+    print(f"🤖 AI: {'✅ Enabled' if KEY else '❌ Disabled'}")
+    print(f"🔐 Google OAuth: {'✅ Configured' if os.environ.get('GOOGLE_CLIENT_ID') else '❌ Not configured'}")
     
     app.run(host='0.0.0.0', port=port, debug=debug)
+else:
+    # For Vercel serverless
+    application = app
