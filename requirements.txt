@@ -2,6 +2,6 @@ flask==2.3.3
 flask-cors==4.0.0
 python-dotenv==1.0.0
 openai==1.3.7
-tiktoken==0.5.1
+# Remove tiktoken and use alternative
 PyPDF2==3.0.1
 authlib==1.2.1
